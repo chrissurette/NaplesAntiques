@@ -185,6 +185,127 @@
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !sheet.hidden) setMenu(false); });
   }
 
+  /* ---------- contact form: photo attachments ----------
+     The HTML has ten file inputs (photo1–10; Netlify takes one file per
+     field and registers whatever names are in the HTML). Without JS the
+     first three show as plain inputs. With JS they're swapped for one
+     "Add photographs" picker with thumbnails, and on submit each photo is
+     scaled down to a ≤ 1600px JPEG so ten phone shots fit Netlify's 8 MB
+     limit — with a harsher second pass if the set is still too big. */
+  var pform = document.querySelector('form[name="contact"]');
+  var pfield = pform && pform.querySelector('.photo-field');
+  if (pfield && window.FormData && window.fetch) {
+    var MAX_BYTES = 7.5 * 1024 * 1024;
+    var PASSES = [[1600, 0.82], [1200, 0.7]];          // [longest edge px, JPEG quality]
+    var slots = pfield.querySelectorAll('.photo-inputs input[type=file]');
+    var MAX_PHOTOS = slots.length;
+    var errBox = pform.querySelector('.form-error');
+    var sendBtn = pform.querySelector('button[type=submit]');
+    var photos = [];
+
+    pfield.querySelector('.photo-inputs').hidden = true;
+    var picker = document.createElement('input');      // no name: never submitted itself
+    picker.type = 'file'; picker.accept = 'image/*'; picker.multiple = true; picker.hidden = true;
+    var thumbs = document.createElement('ul');
+    thumbs.className = 'photo-thumbs';
+    var addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'photo-add';
+    addBtn.id = 'f-photo-add';
+    pfield.querySelector('label').htmlFor = addBtn.id;
+    pfield.querySelector('.form-hint').before(thumbs, addBtn, picker);
+
+    var showError = function (msg) { errBox.textContent = msg; errBox.hidden = !msg; };
+    var render = function () {
+      thumbs.querySelectorAll('img').forEach(function (i) { URL.revokeObjectURL(i.src); });
+      thumbs.innerHTML = '';
+      photos.forEach(function (f, n) {
+        var li = document.createElement('li');
+        var img = document.createElement('img');
+        img.src = URL.createObjectURL(f);
+        img.alt = '';
+        var rm = document.createElement('button');
+        rm.type = 'button';
+        rm.textContent = '×';
+        rm.setAttribute('aria-label', 'Remove ' + f.name);
+        rm.addEventListener('click', function () { photos.splice(n, 1); render(); addBtn.focus(); });
+        li.append(img, rm);
+        thumbs.appendChild(li);
+      });
+      addBtn.hidden = photos.length >= MAX_PHOTOS;
+      addBtn.textContent = photos.length ? '+ Add another' : '+ Add photographs';
+    };
+    addBtn.addEventListener('click', function () { picker.click(); });
+    picker.addEventListener('change', function () {
+      var picked = Array.prototype.slice.call(picker.files);
+      var room = MAX_PHOTOS - photos.length;
+      photos = photos.concat(picked.slice(0, room));
+      showError(picked.length > room ? 'Up to ' + MAX_PHOTOS + ' photographs here — send the rest by email once we\'ve written back.' : '');
+      picker.value = '';
+      render();
+    });
+    render();
+
+    // Scale one photo down; if the browser can't decode it (e.g. HEIC on
+    // desktop Chrome), send the original and let the size check decide.
+    var shrink = function (file, edge, quality) {
+      return new Promise(function (resolve) {
+        var url = URL.createObjectURL(file);
+        var img = new Image();
+        img.onload = function () {
+          URL.revokeObjectURL(url);
+          var k = Math.min(1, edge / Math.max(img.naturalWidth, img.naturalHeight));
+          if (k === 1 && file.size < 400 * 1024) return resolve(file);
+          var c = document.createElement('canvas');
+          c.width = Math.round(img.naturalWidth * k);
+          c.height = Math.round(img.naturalHeight * k);
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          c.toBlob(function (b) {
+            resolve(b ? new File([b], file.name.replace(/\.[^.]*$/, '') + '.jpg', { type: 'image/jpeg' }) : file);
+          }, 'image/jpeg', quality);
+        };
+        img.onerror = function () { URL.revokeObjectURL(url); resolve(file); };
+        img.src = url;
+      });
+    };
+
+    pform.addEventListener('submit', function (e) {
+      if (!photos.length) return;                       // no photos: plain HTML post
+      e.preventDefault();
+      showError('');
+      sendBtn.disabled = true;
+      sendBtn.textContent = 'Preparing photos…';
+      var fail = function (msg) {
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'Send';
+        showError(msg);
+      };
+      // One photo at a time: decoding ten 12-megapixel images at once can
+      // run a phone browser out of memory.
+      var shrinkAll = function (pass) {
+        var out = [];
+        return photos.reduce(function (p, f) {
+          return p.then(function () { return shrink(f, pass[0], pass[1]); }).then(function (s) { out.push(s); });
+        }, Promise.resolve()).then(function () { return out; });
+      };
+      var totalOf = function (files) { return files.reduce(function (s, f) { return s + f.size; }, 0); };
+      shrinkAll(PASSES[0]).then(function (files) {
+        return totalOf(files) > MAX_BYTES ? shrinkAll(PASSES[1]) : files;
+      }).then(function (files) {
+        if (totalOf(files) > MAX_BYTES) return fail('Those photographs are too large to send together. Try a few fewer, or send them by email once we\'ve written back.');
+        sendBtn.textContent = 'Sending…';
+        var data = new FormData(pform);
+        files.forEach(function (f, n) { data.set(slots[n].name, f, f.name); });
+        return fetch('/', { method: 'POST', body: data }).then(function (r) {
+          if (!r.ok) throw new Error(r.status);
+          location.href = pform.getAttribute('action');
+        });
+      }).catch(function () {
+        fail('Something went wrong sending that. Please try again, or call us at ' + errBox.getAttribute('data-phone') + '.');
+      });
+    });
+  }
+
   /* ---------- placeholder badges (local preview only) ----------
      Images marked data-placeholder="…" are stand-ins for real photos.
      Show a small tag over them on localhost so they're easy to spot;
